@@ -175,7 +175,7 @@ final class DownloadEngine: Sendable {
         lock.unlock()
 
         for downloader in newDownloaders {
-            downloader.start(session: urlSession)
+            downloader.start(session: urlSession, delegate: sessionDelegate)
         }
     }
 

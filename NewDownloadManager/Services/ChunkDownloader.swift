@@ -37,7 +37,7 @@ final class ChunkDownloader: NSObject, Sendable {
         self.onComplete = onComplete
     }
 
-    func start(session: URLSession) {
+    func start(session: URLSession, delegate: ChunkDownloadSessionDelegate) {
         lock.lock()
         guard !isCancelled else {
             lock.unlock()
@@ -60,6 +60,7 @@ final class ChunkDownloader: NSObject, Sendable {
         request.setValue(range, forHTTPHeaderField: "Range")
 
         let task = session.dataTask(with: request)
+        delegate.register(self, for: task)
         dataTask = task
         lock.unlock()
 
