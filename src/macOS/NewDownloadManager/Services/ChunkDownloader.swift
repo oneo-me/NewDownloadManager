@@ -8,12 +8,11 @@ enum ChunkDownloadError: Error, Sendable {
 }
 
 final class ChunkDownloader: NSObject, Sendable {
-    private static let defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
-
     let chunkIndex: Int
     let url: URL
     let range: String?
     let requestHeaders: [String: String]
+    let defaultUserAgent: String
     let filePath: URL
 
     nonisolated(unsafe) private var fileHandle: FileHandle?
@@ -29,6 +28,7 @@ final class ChunkDownloader: NSObject, Sendable {
         url: URL,
         range: String?,
         requestHeaders: [String: String],
+        defaultUserAgent: String,
         filePath: URL,
         onProgress: @escaping @Sendable (Int, Int64) -> Void,
         onComplete: @escaping @Sendable (Int, Result<Void, ChunkDownloadError>) -> Void
@@ -37,6 +37,7 @@ final class ChunkDownloader: NSObject, Sendable {
         self.url = url
         self.range = range
         self.requestHeaders = requestHeaders
+        self.defaultUserAgent = defaultUserAgent
         self.filePath = filePath
         self.onProgress = onProgress
         self.onComplete = onComplete
@@ -90,7 +91,7 @@ final class ChunkDownloader: NSObject, Sendable {
         }
 
         if !hasUserAgent {
-            request.setValue(Self.defaultUserAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue(defaultUserAgent, forHTTPHeaderField: "User-Agent")
         }
     }
 

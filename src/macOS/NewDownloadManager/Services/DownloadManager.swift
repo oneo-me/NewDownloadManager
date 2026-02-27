@@ -2,15 +2,73 @@ import Foundation
 import SwiftUI
 import AppKit
 
+enum AppTheme: String, CaseIterable, Sendable {
+    case system
+    case light
+    case dark
+
+    var title: String {
+        switch self {
+        case .system: return "系统"
+        case .light: return "亮色"
+        case .dark: return "暗色"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+
 @Observable
 final class DownloadManager {
     private static let chromeInterceptionEnabledDefaultsKey = "ChromeInterceptionEnabled"
+    private static let appThemeDefaultsKey = "AppTheme"
+    private static let userAgentDefaultsKey = "DownloadUserAgent"
+    private static let maxConnectionsDefaultsKey = "DownloadMaxConnections"
+    private static let customDownloadDirectoryDefaultsKey = "CustomDownloadDirectory"
+
+    private static let defaultMaxConnections = 8
+
+    static func systemDownloadsDirectoryPath() -> String {
+        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.path ?? NSHomeDirectory()
+    }
 
     var items: [DownloadItem] = []
     var selectedItemID: UUID?
+    var isSettingsSheetPresented: Bool = false
     var chromeInterceptionEnabled: Bool {
         didSet {
             UserDefaults.standard.set(chromeInterceptionEnabled, forKey: Self.chromeInterceptionEnabledDefaultsKey)
+        }
+    }
+    var appTheme: AppTheme {
+        didSet {
+            UserDefaults.standard.set(appTheme.rawValue, forKey: Self.appThemeDefaultsKey)
+        }
+    }
+    var customUserAgent: String {
+        didSet {
+            UserDefaults.standard.set(customUserAgent, forKey: Self.userAgentDefaultsKey)
+        }
+    }
+    var maxDownloadConnections: Int {
+        didSet {
+            let clamped = max(1, min(32, maxDownloadConnections))
+            if clamped != maxDownloadConnections {
+                maxDownloadConnections = clamped
+                return
+            }
+            UserDefaults.standard.set(clamped, forKey: Self.maxConnectionsDefaultsKey)
+        }
+    }
+    var customDownloadDirectory: String {
+        didSet {
+            UserDefaults.standard.set(customDownloadDirectory, forKey: Self.customDownloadDirectoryDefaultsKey)
         }
     }
 
@@ -21,11 +79,38 @@ final class DownloadManager {
     private var pendingProgressByItem: [UUID: [Int: Int64]] = [:]
 
     init() {
+        let initialChromeInterceptionEnabled: Bool
         if UserDefaults.standard.object(forKey: Self.chromeInterceptionEnabledDefaultsKey) == nil {
-            chromeInterceptionEnabled = true
+            initialChromeInterceptionEnabled = true
         } else {
-            chromeInterceptionEnabled = UserDefaults.standard.bool(forKey: Self.chromeInterceptionEnabledDefaultsKey)
+            initialChromeInterceptionEnabled = UserDefaults.standard.bool(forKey: Self.chromeInterceptionEnabledDefaultsKey)
         }
+
+        let initialCustomUserAgent = UserDefaults.standard.string(forKey: Self.userAgentDefaultsKey) ?? ""
+
+        let initialTheme = AppTheme(rawValue: UserDefaults.standard.string(forKey: Self.appThemeDefaultsKey) ?? "") ?? .system
+
+        let savedConnections = UserDefaults.standard.integer(forKey: Self.maxConnectionsDefaultsKey)
+        let initialMaxConnections: Int
+        if UserDefaults.standard.object(forKey: Self.maxConnectionsDefaultsKey) == nil || savedConnections <= 0 {
+            initialMaxConnections = Self.defaultMaxConnections
+        } else {
+            initialMaxConnections = savedConnections
+        }
+
+        let initialCustomDirectory: String
+        if let savedDirectory = UserDefaults.standard.string(forKey: Self.customDownloadDirectoryDefaultsKey),
+           !savedDirectory.isEmpty {
+            initialCustomDirectory = savedDirectory
+        } else {
+            initialCustomDirectory = ""
+        }
+
+        chromeInterceptionEnabled = initialChromeInterceptionEnabled
+        appTheme = initialTheme
+        customUserAgent = initialCustomUserAgent
+        maxDownloadConnections = initialMaxConnections
+        customDownloadDirectory = initialCustomDirectory
 
         loadFromDisk()
         startSpeedTimer()
@@ -132,8 +217,8 @@ final class DownloadManager {
         if let destinationPath, !destinationPath.isEmpty {
             dest = destinationPath
         } else {
-            let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
-            dest = downloads.appendingPathComponent(name).path
+            let baseDirectory = resolvedDefaultDownloadDirectory()
+            dest = URL(fileURLWithPath: baseDirectory, isDirectory: true).appendingPathComponent(name).path
         }
 
         let id = UUID()
@@ -197,7 +282,9 @@ final class DownloadManager {
                     self?.handleMetadata(itemId: itemId, totalBytes: totalBytes, chunks: chunks)
                 }
             },
-            requestHeaders: items[index].requestHeaders
+            requestHeaders: items[index].requestHeaders,
+            defaultUserAgent: effectiveUserAgent,
+            maxParallelConnections: maxDownloadConnections
         )
 
         engines[id] = engine
@@ -271,6 +358,13 @@ final class DownloadManager {
         for item in items where item.status.canResume {
             resumeDownload(item.id)
         }
+    }
+
+    func resetDownloadSettingsToDefault() {
+        appTheme = .system
+        customUserAgent = ""
+        maxDownloadConnections = Self.defaultMaxConnections
+        customDownloadDirectory = ""
     }
 
     // MARK: - Callbacks
@@ -368,5 +462,32 @@ final class DownloadManager {
         items[index].eta = 0
         engines.removeValue(forKey: itemId)
         saveToDisk()
+    }
+
+    private var effectiveUserAgent: String {
+        let trimmed = customUserAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? DownloadEngine.fallbackUserAgent : trimmed
+    }
+
+    var effectiveColorScheme: ColorScheme? {
+        appTheme.colorScheme
+    }
+
+    var defaultDownloadDirectoryPlaceholder: String {
+        Self.systemDownloadsDirectoryPath()
+    }
+
+    private func resolvedDefaultDownloadDirectory() -> String {
+        let trimmed = customDownloadDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let path = trimmed.isEmpty ? Self.systemDownloadsDirectoryPath() : trimmed
+
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return path
+        }
+
+        let fallback = Self.systemDownloadsDirectoryPath()
+        customDownloadDirectory = ""
+        return fallback
     }
 }

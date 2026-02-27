@@ -11,10 +11,10 @@ struct ContentView: View {
         )
     }
 
-    private var chromeInterceptionBinding: Binding<Bool> {
+    private var settingsSheetBinding: Binding<Bool> {
         Binding(
-            get: { manager.chromeInterceptionEnabled },
-            set: { manager.chromeInterceptionEnabled = $0 }
+            get: { manager.isSettingsSheetPresented },
+            set: { manager.isSettingsSheetPresented = $0 }
         )
     }
 
@@ -35,12 +35,13 @@ struct ContentView: View {
             }
         }
         .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
-                Toggle("Chrome拦截", isOn: chromeInterceptionBinding)
-                    .help("控制是否接管 Chrome 下载")
-            }
-
             ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    manager.isSettingsSheetPresented = true
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+
                 Button {
                     showAddSheet = true
                 } label: {
@@ -64,6 +65,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showAddSheet) {
             AddDownloadSheet()
+        }
+        .sheet(isPresented: settingsSheetBinding) {
+            SettingsSheet()
         }
         .frame(minWidth: 700, minHeight: 450)
     }

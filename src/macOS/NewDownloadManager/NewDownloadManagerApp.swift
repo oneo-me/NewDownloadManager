@@ -8,6 +8,15 @@ struct NewDownloadManagerApp: App {
         Window("NewDownloadManager", id: "main") {
             ContentView()
                 .environment(downloadManager)
+                .preferredColorScheme(downloadManager.effectiveColorScheme)
+        }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings...") {
+                    downloadManager.isSettingsSheetPresented = true
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
         }
     }
 }

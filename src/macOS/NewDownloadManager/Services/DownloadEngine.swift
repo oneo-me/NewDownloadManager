@@ -1,7 +1,7 @@
 import Foundation
 
 final class DownloadEngine: Sendable {
-    private static let defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
+    static let fallbackUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
 
     let itemId: UUID
     private let sessionDelegate = ChunkDownloadSessionDelegate()
@@ -20,6 +20,8 @@ final class DownloadEngine: Sendable {
     private let onError: @Sendable (UUID, String) -> Void
     private let onMetadata: @Sendable (UUID, Int64, [ChunkInfo]) -> Void
     private let requestHeaders: [String: String]
+    private let defaultUserAgent: String
+    private let maxParallelConnections: Int
 
     init(
         itemId: UUID,
@@ -28,7 +30,9 @@ final class DownloadEngine: Sendable {
         onAllComplete: @escaping @Sendable (UUID) -> Void,
         onError: @escaping @Sendable (UUID, String) -> Void,
         onMetadata: @escaping @Sendable (UUID, Int64, [ChunkInfo]) -> Void,
-        requestHeaders: [String: String]? = nil
+        requestHeaders: [String: String]? = nil,
+        defaultUserAgent: String = DownloadEngine.fallbackUserAgent,
+        maxParallelConnections: Int = 8
     ) {
         self.itemId = itemId
         self.onProgress = onProgress
@@ -37,6 +41,8 @@ final class DownloadEngine: Sendable {
         self.onError = onError
         self.onMetadata = onMetadata
         self.requestHeaders = requestHeaders ?? [:]
+        self.defaultUserAgent = defaultUserAgent
+        self.maxParallelConnections = max(1, min(32, maxParallelConnections))
     }
 
     static var tempDirectory: URL {
@@ -146,7 +152,7 @@ final class DownloadEngine: Sendable {
         }
 
         let config = URLSessionConfiguration.default
-        config.httpMaximumConnectionsPerHost = 8
+        config.httpMaximumConnectionsPerHost = maxParallelConnections
         let urlSession = URLSession(configuration: config, delegate: sessionDelegate, delegateQueue: nil)
         session = urlSession
 
@@ -162,6 +168,7 @@ final class DownloadEngine: Sendable {
                 url: url,
                 range: rangeHeader,
                 requestHeaders: requestHeaders,
+                defaultUserAgent: defaultUserAgent,
                 filePath: chunkFilePath(for: chunk.id),
                 onProgress: { [weak self] index, bytes in
                     guard let self else { return }
@@ -256,6 +263,7 @@ final class DownloadEngine: Sendable {
             url: url,
             range: nil,
             requestHeaders: requestHeaders,
+            defaultUserAgent: defaultUserAgent,
             filePath: chunkFilePath(for: singleChunk.id),
             onProgress: { [weak self] index, bytes in
                 guard let self else { return }
@@ -312,7 +320,7 @@ final class DownloadEngine: Sendable {
         }
 
         if !hasUserAgent {
-            request.setValue(Self.defaultUserAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue(defaultUserAgent, forHTTPHeaderField: "User-Agent")
         }
     }
 
