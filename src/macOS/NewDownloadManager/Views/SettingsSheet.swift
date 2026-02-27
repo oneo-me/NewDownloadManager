@@ -98,6 +98,15 @@ struct SettingsSheet: View {
                 .pickerStyle(.segmented)
             }
 
+            GroupBox("程序显示") {
+                Picker("显示方式", selection: Bindable(manager).appDisplayMode) {
+                    ForEach(AppDisplayMode.allCases, id: \.rawValue) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
             GroupBox("User-Agent") {
                 TextField(
                     "User-Agent",

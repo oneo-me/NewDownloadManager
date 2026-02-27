@@ -84,7 +84,7 @@ struct AddDownloadSheet: View {
             destPath = (customPath as NSString).appendingPathComponent(name)
         }
 
-        manager.addDownload(url: trimmedURL, fileName: fileName, destinationPath: destPath)
+        manager.addDownload(url: trimmedURL, fileName: fileName, destinationPath: destPath, revealInUI: true)
         dismiss()
     }
 

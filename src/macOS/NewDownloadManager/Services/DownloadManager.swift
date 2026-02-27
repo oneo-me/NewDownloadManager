@@ -24,10 +24,39 @@ enum AppTheme: String, CaseIterable, Sendable {
     }
 }
 
+enum AppDisplayMode: String, CaseIterable, Sendable {
+    case dockAndMenuBar
+    case dockOnly
+    case menuBarOnly
+
+    var title: String {
+        switch self {
+        case .dockAndMenuBar: return "显示到 Dock 与 MenuBar"
+        case .dockOnly: return "仅显示 Dock"
+        case .menuBarOnly: return "仅显示到 MenuBar"
+        }
+    }
+
+    var showsMenuBarExtra: Bool {
+        switch self {
+        case .dockAndMenuBar, .menuBarOnly: return true
+        case .dockOnly: return false
+        }
+    }
+
+    var activationPolicy: NSApplication.ActivationPolicy {
+        switch self {
+        case .dockAndMenuBar, .dockOnly: return .regular
+        case .menuBarOnly: return .accessory
+        }
+    }
+}
+
 @Observable
 final class DownloadManager {
     private static let chromeInterceptionEnabledDefaultsKey = "ChromeInterceptionEnabled"
     private static let appThemeDefaultsKey = "AppTheme"
+    private static let appDisplayModeDefaultsKey = "AppDisplayMode"
     private static let userAgentDefaultsKey = "DownloadUserAgent"
     private static let maxConnectionsDefaultsKey = "DownloadMaxConnections"
     private static let customDownloadDirectoryDefaultsKey = "CustomDownloadDirectory"
@@ -49,6 +78,12 @@ final class DownloadManager {
     var appTheme: AppTheme {
         didSet {
             UserDefaults.standard.set(appTheme.rawValue, forKey: Self.appThemeDefaultsKey)
+        }
+    }
+    var appDisplayMode: AppDisplayMode {
+        didSet {
+            UserDefaults.standard.set(appDisplayMode.rawValue, forKey: Self.appDisplayModeDefaultsKey)
+            applyDisplayMode()
         }
     }
     var customUserAgent: String {
@@ -89,6 +124,7 @@ final class DownloadManager {
         let initialCustomUserAgent = UserDefaults.standard.string(forKey: Self.userAgentDefaultsKey) ?? ""
 
         let initialTheme = AppTheme(rawValue: UserDefaults.standard.string(forKey: Self.appThemeDefaultsKey) ?? "") ?? .system
+        let initialDisplayMode = AppDisplayMode(rawValue: UserDefaults.standard.string(forKey: Self.appDisplayModeDefaultsKey) ?? "") ?? .dockOnly
 
         let savedConnections = UserDefaults.standard.integer(forKey: Self.maxConnectionsDefaultsKey)
         let initialMaxConnections: Int
@@ -108,10 +144,12 @@ final class DownloadManager {
 
         chromeInterceptionEnabled = initialChromeInterceptionEnabled
         appTheme = initialTheme
+        appDisplayMode = initialDisplayMode
         customUserAgent = initialCustomUserAgent
         maxDownloadConnections = initialMaxConnections
         customDownloadDirectory = initialCustomDirectory
 
+        applyDisplayMode()
         loadFromDisk()
         startSpeedTimer()
         startExtensionCommandServer()
@@ -161,14 +199,13 @@ final class DownloadManager {
             guard !normalizedURL.isEmpty else { return }
             guard let self else { return }
 
-            let id = self.addDownload(
+            self.addDownload(
                 url: normalizedURL,
                 fileName: request.filename,
                 destinationPath: nil,
                 requestHeaders: nil,
                 revealInUI: true
             )
-            self.revealDownloadInUI(id)
         }
         extensionCommandServer.start()
     }
@@ -232,7 +269,7 @@ final class DownloadManager {
         )
         items.append(item)
         if revealInUI {
-            selectedItemID = id
+            revealDownloadInUI(id)
         }
         saveToDisk()
         startDownload(id)
@@ -362,6 +399,7 @@ final class DownloadManager {
 
     func resetDownloadSettingsToDefault() {
         appTheme = .system
+        appDisplayMode = .dockOnly
         customUserAgent = ""
         maxDownloadConnections = Self.defaultMaxConnections
         customDownloadDirectory = ""
@@ -473,6 +511,10 @@ final class DownloadManager {
         appTheme.colorScheme
     }
 
+    var isMenuBarExtraVisible: Bool {
+        appDisplayMode.showsMenuBarExtra
+    }
+
     var defaultDownloadDirectoryPlaceholder: String {
         Self.systemDownloadsDirectoryPath()
     }
@@ -489,5 +531,12 @@ final class DownloadManager {
         let fallback = Self.systemDownloadsDirectoryPath()
         customDownloadDirectory = ""
         return fallback
+    }
+
+    private func applyDisplayMode() {
+        let mode = appDisplayMode
+        DispatchQueue.main.async {
+            NSApp.setActivationPolicy(mode.activationPolicy)
+        }
     }
 }
