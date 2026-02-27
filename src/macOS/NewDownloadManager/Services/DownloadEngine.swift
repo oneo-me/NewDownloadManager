@@ -1,6 +1,8 @@
 import Foundation
 
 final class DownloadEngine: Sendable {
+    private static let defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
+
     let itemId: UUID
     private let sessionDelegate = ChunkDownloadSessionDelegate()
     nonisolated(unsafe) private var session: URLSession?
@@ -8,6 +10,8 @@ final class DownloadEngine: Sendable {
     nonisolated(unsafe) private var completedChunks = 0
     nonisolated(unsafe) private var totalChunks = 0
     nonisolated(unsafe) private var isCancelled = false
+    nonisolated(unsafe) private var hasTriggeredSingleConnectionFallback = false
+    nonisolated(unsafe) private var knownTotalBytes: Int64 = 0
     private let lock = NSLock()
 
     private let onProgress: @Sendable (UUID, Int, Int64) -> Void
@@ -15,6 +19,7 @@ final class DownloadEngine: Sendable {
     private let onAllComplete: @Sendable (UUID) -> Void
     private let onError: @Sendable (UUID, String) -> Void
     private let onMetadata: @Sendable (UUID, Int64, [ChunkInfo]) -> Void
+    private let requestHeaders: [String: String]
 
     init(
         itemId: UUID,
@@ -22,7 +27,8 @@ final class DownloadEngine: Sendable {
         onChunkComplete: @escaping @Sendable (UUID, Int) -> Void,
         onAllComplete: @escaping @Sendable (UUID) -> Void,
         onError: @escaping @Sendable (UUID, String) -> Void,
-        onMetadata: @escaping @Sendable (UUID, Int64, [ChunkInfo]) -> Void
+        onMetadata: @escaping @Sendable (UUID, Int64, [ChunkInfo]) -> Void,
+        requestHeaders: [String: String]? = nil
     ) {
         self.itemId = itemId
         self.onProgress = onProgress
@@ -30,6 +36,7 @@ final class DownloadEngine: Sendable {
         self.onAllComplete = onAllComplete
         self.onError = onError
         self.onMetadata = onMetadata
+        self.requestHeaders = requestHeaders ?? [:]
     }
 
     static var tempDirectory: URL {
@@ -45,6 +52,8 @@ final class DownloadEngine: Sendable {
     func start(url: URL, existingChunks: [ChunkInfo]?) {
         lock.lock()
         isCancelled = false
+        hasTriggeredSingleConnectionFallback = false
+        knownTotalBytes = 0
         lock.unlock()
 
         if let chunks = existingChunks, !chunks.isEmpty {
@@ -57,6 +66,7 @@ final class DownloadEngine: Sendable {
     private func fetchMetadataAndStart(url: URL) {
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
+        applyRequestHeaders(to: &request, includeRange: false)
 
         let metaSession = URLSession(configuration: .ephemeral)
         let task = metaSession.dataTask(with: request) { [weak self] _, response, error in
@@ -76,6 +86,10 @@ final class DownloadEngine: Sendable {
 
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                 let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if self.shouldFallbackToSingleConnection(forStatusCode: code) {
+                    self.startSingleConnectionDownload(url: url, totalBytes: 0)
+                    return
+                }
                 self.onError(self.itemId, "HTTP error \(code)")
                 return
             }
@@ -88,9 +102,13 @@ final class DownloadEngine: Sendable {
             if supportsRange, contentLength > 0 {
                 chunks = Self.createChunks(totalBytes: contentLength)
             } else {
-                let total = max(contentLength, 0)
-                chunks = [ChunkInfo(id: 0, startByte: 0, endByte: total > 0 ? total - 1 : Int64.max)]
+                // Non-range mode: keep an open-ended chunk so downloader can omit Range header.
+                chunks = [ChunkInfo(id: 0, startByte: 0, endByte: Int64.max)]
             }
+
+            self.lock.lock()
+            self.knownTotalBytes = max(contentLength, 0)
+            self.lock.unlock()
 
             self.onMetadata(self.itemId, max(contentLength, 0), chunks)
             self.startChunkDownloads(url: url, chunks: chunks)
@@ -138,10 +156,12 @@ final class DownloadEngine: Sendable {
 
         var newDownloaders: [ChunkDownloader] = []
         for chunk in pending {
+            let rangeHeader = chunk.endByte == Int64.max ? nil : chunk.rangeHeaderValue
             let downloader = ChunkDownloader(
                 chunkIndex: chunk.id,
                 url: url,
-                range: chunk.rangeHeaderValue,
+                range: rangeHeader,
+                requestHeaders: requestHeaders,
                 filePath: chunkFilePath(for: chunk.id),
                 onProgress: { [weak self] index, bytes in
                     guard let self else { return }
@@ -163,6 +183,12 @@ final class DownloadEngine: Sendable {
                         switch error {
                         case .cancelled:
                             break
+                        case .httpError(let statusCode):
+                            if self.shouldFallbackFromChunkFailure(statusCode: statusCode, chunkCount: chunks.count) {
+                                self.startSingleConnectionDownload(url: url, totalBytes: self.knownTotalBytes)
+                            } else {
+                                self.onError(self.itemId, "Chunk \(index) failed: \(error)")
+                            }
                         default:
                             self.onError(self.itemId, "Chunk \(index) failed: \(error)")
                         }
@@ -178,6 +204,128 @@ final class DownloadEngine: Sendable {
             downloader.start(session: urlSession, delegate: sessionDelegate)
         }
     }
+
+    private func shouldFallbackToSingleConnection(forStatusCode statusCode: Int) -> Bool {
+        statusCode == 403 || statusCode == 429 || statusCode == 405
+    }
+
+    private func shouldFallbackFromChunkFailure(statusCode: Int, chunkCount: Int) -> Bool {
+        guard chunkCount > 1 else { return false }
+        return shouldFallbackToSingleConnection(forStatusCode: statusCode)
+    }
+
+    private func startSingleConnectionDownload(url: URL, totalBytes: Int64) {
+        lock.lock()
+        if isCancelled || hasTriggeredSingleConnectionFallback {
+            lock.unlock()
+            return
+        }
+        hasTriggeredSingleConnectionFallback = true
+        let currentDownloaders = downloaders
+        let currentSession = session
+        downloaders = []
+        session = nil
+        lock.unlock()
+
+        sessionDelegate.clear()
+        for downloader in currentDownloaders {
+            downloader.cancel()
+        }
+        currentSession?.invalidateAndCancel()
+
+        cleanupChunkFiles()
+
+        let singleChunk = ChunkInfo(id: 0, startByte: 0, endByte: Int64.max)
+        onMetadata(itemId, max(totalBytes, 0), [singleChunk])
+
+        lock.lock()
+        if isCancelled {
+            lock.unlock()
+            return
+        }
+
+        let config = URLSessionConfiguration.default
+        config.httpMaximumConnectionsPerHost = 1
+        let urlSession = URLSession(configuration: config, delegate: sessionDelegate, delegateQueue: nil)
+        session = urlSession
+        totalChunks = 1
+        completedChunks = 0
+
+        let downloader = ChunkDownloader(
+            chunkIndex: singleChunk.id,
+            url: url,
+            range: nil,
+            requestHeaders: requestHeaders,
+            filePath: chunkFilePath(for: singleChunk.id),
+            onProgress: { [weak self] index, bytes in
+                guard let self else { return }
+                self.onProgress(self.itemId, index, bytes)
+            },
+            onComplete: { [weak self] index, result in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.onChunkComplete(self.itemId, index)
+                    self.onAllComplete(self.itemId)
+                case .failure(let error):
+                    switch error {
+                    case .cancelled:
+                        break
+                    default:
+                        self.onError(self.itemId, "Chunk \(index) failed: \(error)")
+                    }
+                }
+            }
+        )
+        downloaders = [downloader]
+        lock.unlock()
+
+        downloader.start(session: urlSession, delegate: sessionDelegate)
+    }
+
+    private func cleanupChunkFiles() {
+        let fm = FileManager.default
+        let tempDir = Self.tempDirectory
+        let prefix = itemId.uuidString
+        if let files = try? fm.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil) {
+            for file in files where file.lastPathComponent.hasPrefix(prefix) {
+                try? fm.removeItem(at: file)
+            }
+        }
+    }
+
+    private func applyRequestHeaders(to request: inout URLRequest, includeRange: Bool) {
+        var hasUserAgent = false
+
+        for (name, value) in requestHeaders {
+            let lower = name.lowercased()
+            if Self.blockedHeaderNames.contains(lower) {
+                continue
+            }
+            if !includeRange && lower == "range" {
+                continue
+            }
+            if lower == "user-agent" {
+                hasUserAgent = true
+            }
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+
+        if !hasUserAgent {
+            request.setValue(Self.defaultUserAgent, forHTTPHeaderField: "User-Agent")
+        }
+    }
+
+    private static let blockedHeaderNames: Set<String> = [
+        "connection",
+        "content-length",
+        "host",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "transfer-encoding",
+        "upgrade"
+    ]
 
     func pause() {
         lock.lock()
@@ -197,14 +345,6 @@ final class DownloadEngine: Sendable {
 
     func cancel() {
         pause()
-
-        let fm = FileManager.default
-        let tempDir = Self.tempDirectory
-        let prefix = itemId.uuidString
-        if let files = try? fm.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil) {
-            for file in files where file.lastPathComponent.hasPrefix(prefix) {
-                try? fm.removeItem(at: file)
-            }
-        }
+        cleanupChunkFiles()
     }
 }

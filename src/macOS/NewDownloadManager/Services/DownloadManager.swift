@@ -18,6 +18,7 @@ final class DownloadManager {
     private var speedTimer: Timer?
     private let extensionCommandServer = ExtensionCommandServer()
     private var lastBytesSnapshot: [UUID: Int64] = [:]
+    private var pendingProgressByItem: [UUID: [Int: Int64]] = [:]
 
     init() {
         if UserDefaults.standard.object(forKey: Self.chromeInterceptionEnabledDefaultsKey) == nil {
@@ -74,10 +75,12 @@ final class DownloadManager {
             let normalizedURL = request.url.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalizedURL.isEmpty else { return }
             guard let self else { return }
+
             let id = self.addDownload(
                 url: normalizedURL,
                 fileName: request.filename,
                 destinationPath: nil,
+                requestHeaders: nil,
                 revealInUI: true
             )
             self.revealDownloadInUI(id)
@@ -117,7 +120,13 @@ final class DownloadManager {
     // MARK: - Actions
 
     @discardableResult
-    func addDownload(url: String, fileName: String?, destinationPath: String?, revealInUI: Bool = false) -> UUID {
+    func addDownload(
+        url: String,
+        fileName: String?,
+        destinationPath: String?,
+        requestHeaders: [String: String]? = nil,
+        revealInUI: Bool = false
+    ) -> UUID {
         let name = fileName ?? URL(string: url)?.lastPathComponent ?? "download"
         let dest: String
         if let destinationPath, !destinationPath.isEmpty {
@@ -133,7 +142,8 @@ final class DownloadManager {
             url: url,
             fileName: name,
             dateAdded: Date(),
-            destinationPath: dest
+            destinationPath: dest,
+            requestHeaders: requestHeaders
         )
         items.append(item)
         if revealInUI {
@@ -186,7 +196,8 @@ final class DownloadManager {
                 Task { @MainActor [weak self] in
                     self?.handleMetadata(itemId: itemId, totalBytes: totalBytes, chunks: chunks)
                 }
-            }
+            },
+            requestHeaders: items[index].requestHeaders
         )
 
         engines[id] = engine
@@ -225,6 +236,7 @@ final class DownloadManager {
         items[index].chunks = []
         items[index].speed = 0
         items[index].eta = 0
+        pendingProgressByItem[id] = nil
         saveToDisk()
     }
 
@@ -236,6 +248,7 @@ final class DownloadManager {
             selectedItemID = nil
         }
         lastBytesSnapshot.removeValue(forKey: id)
+        pendingProgressByItem[id] = nil
         saveToDisk()
     }
 
@@ -244,6 +257,7 @@ final class DownloadManager {
         items[index].chunks = []
         items[index].totalBytes = 0
         items[index].errorMessage = nil
+        pendingProgressByItem[id] = nil
         startDownload(id)
     }
 
@@ -262,8 +276,14 @@ final class DownloadManager {
     // MARK: - Callbacks
 
     private func handleProgress(itemId: UUID, chunkIndex: Int, bytesWritten: Int64) {
-        guard let index = items.firstIndex(where: { $0.id == itemId }),
-              let chunkIdx = items[index].chunks.firstIndex(where: { $0.id == chunkIndex }) else { return }
+        guard let index = items.firstIndex(where: { $0.id == itemId }) else { return }
+        guard let chunkIdx = items[index].chunks.firstIndex(where: { $0.id == chunkIndex }) else {
+            var pending = pendingProgressByItem[itemId] ?? [:]
+            pending[chunkIndex, default: 0] += bytesWritten
+            pendingProgressByItem[itemId] = pending
+            return
+        }
+
         items[index].chunks[chunkIdx].bytesDownloaded += bytesWritten
     }
 
@@ -277,14 +297,32 @@ final class DownloadManager {
     private func handleMetadata(itemId: UUID, totalBytes: Int64, chunks: [ChunkInfo]) {
         guard let index = items.firstIndex(where: { $0.id == itemId }) else { return }
         items[index].totalBytes = totalBytes
-        if items[index].chunks.isEmpty {
+        let current = items[index].chunks
+        let shouldReplaceChunks =
+            current.isEmpty ||
+            current.count != chunks.count ||
+            zip(current, chunks).contains { lhs, rhs in
+                lhs.id != rhs.id || lhs.startByte != rhs.startByte || lhs.endByte != rhs.endByte
+            }
+        if shouldReplaceChunks {
             items[index].chunks = chunks
         }
+
+        if let pending = pendingProgressByItem[itemId], !pending.isEmpty {
+            for (chunkID, bytes) in pending {
+                if let chunkIdx = items[index].chunks.firstIndex(where: { $0.id == chunkID }) {
+                    items[index].chunks[chunkIdx].bytesDownloaded += bytes
+                }
+            }
+            pendingProgressByItem[itemId] = nil
+        }
+
         saveToDisk()
     }
 
     private func handleAllComplete(itemId: UUID) {
         guard let index = items.firstIndex(where: { $0.id == itemId }) else { return }
+        pendingProgressByItem[itemId] = nil
         items[index].status = .merging
         items[index].speed = 0
         items[index].eta = 0
@@ -323,6 +361,7 @@ final class DownloadManager {
 
     private func handleError(itemId: UUID, message: String) {
         guard let index = items.firstIndex(where: { $0.id == itemId }) else { return }
+        pendingProgressByItem[itemId] = nil
         items[index].status = .failed
         items[index].errorMessage = message
         items[index].speed = 0

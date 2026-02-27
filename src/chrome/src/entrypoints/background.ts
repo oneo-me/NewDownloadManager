@@ -219,7 +219,6 @@ async function forwardToLocalApp(item: Browser.downloads.DownloadItem): Promise<
     originalUrl: item.url,
     filename: item.filename || null,
     mime: item.mime || null,
-    referrer: item.referrer || null,
     totalBytes: item.totalBytes ?? null,
   };
 

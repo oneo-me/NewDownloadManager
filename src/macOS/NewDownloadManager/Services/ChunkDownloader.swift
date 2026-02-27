@@ -8,9 +8,12 @@ enum ChunkDownloadError: Error, Sendable {
 }
 
 final class ChunkDownloader: NSObject, Sendable {
+    private static let defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
+
     let chunkIndex: Int
     let url: URL
-    let range: String
+    let range: String?
+    let requestHeaders: [String: String]
     let filePath: URL
 
     nonisolated(unsafe) private var fileHandle: FileHandle?
@@ -24,7 +27,8 @@ final class ChunkDownloader: NSObject, Sendable {
     init(
         chunkIndex: Int,
         url: URL,
-        range: String,
+        range: String?,
+        requestHeaders: [String: String],
         filePath: URL,
         onProgress: @escaping @Sendable (Int, Int64) -> Void,
         onComplete: @escaping @Sendable (Int, Result<Void, ChunkDownloadError>) -> Void
@@ -32,6 +36,7 @@ final class ChunkDownloader: NSObject, Sendable {
         self.chunkIndex = chunkIndex
         self.url = url
         self.range = range
+        self.requestHeaders = requestHeaders
         self.filePath = filePath
         self.onProgress = onProgress
         self.onComplete = onComplete
@@ -57,7 +62,10 @@ final class ChunkDownloader: NSObject, Sendable {
         }
 
         var request = URLRequest(url: url)
-        request.setValue(range, forHTTPHeaderField: "Range")
+        applyRequestHeaders(to: &request)
+        if let range {
+            request.setValue(range, forHTTPHeaderField: "Range")
+        }
 
         let task = session.dataTask(with: request)
         delegate.register(self, for: task)
@@ -66,6 +74,36 @@ final class ChunkDownloader: NSObject, Sendable {
 
         task.resume()
     }
+
+    private func applyRequestHeaders(to request: inout URLRequest) {
+        var hasUserAgent = false
+
+        for (name, value) in requestHeaders {
+            let lower = name.lowercased()
+            if Self.blockedHeaderNames.contains(lower) || lower == "range" {
+                continue
+            }
+            if lower == "user-agent" {
+                hasUserAgent = true
+            }
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+
+        if !hasUserAgent {
+            request.setValue(Self.defaultUserAgent, forHTTPHeaderField: "User-Agent")
+        }
+    }
+
+    private static let blockedHeaderNames: Set<String> = [
+        "connection",
+        "content-length",
+        "host",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "transfer-encoding",
+        "upgrade"
+    ]
 
     func cancel() {
         lock.lock()

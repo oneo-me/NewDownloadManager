@@ -9,6 +9,7 @@ struct DownloadItem: Identifiable, Codable, Sendable {
     var totalBytes: Int64 = 0
     var chunks: [ChunkInfo] = []
     var destinationPath: String = ""
+    var requestHeaders: [String: String]?
     var errorMessage: String?
     var speed: Int64 = 0
     var eta: TimeInterval = 0
@@ -23,6 +24,6 @@ struct DownloadItem: Identifiable, Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, url, fileName, dateAdded, status, totalBytes, chunks, destinationPath, errorMessage
+        case id, url, fileName, dateAdded, status, totalBytes, chunks, destinationPath, requestHeaders, errorMessage
     }
 }
