@@ -1,16 +1,39 @@
 import Foundation
 import SwiftUI
+import AppKit
 
 @Observable
 final class DownloadManager {
+    private static let chromeInterceptionEnabledDefaultsKey = "ChromeInterceptionEnabled"
+
     var items: [DownloadItem] = []
+    var selectedItemID: UUID?
+    var chromeInterceptionEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(chromeInterceptionEnabled, forKey: Self.chromeInterceptionEnabledDefaultsKey)
+        }
+    }
+
     private var engines: [UUID: DownloadEngine] = [:]
     private var speedTimer: Timer?
+    private let extensionCommandServer = ExtensionCommandServer()
     private var lastBytesSnapshot: [UUID: Int64] = [:]
 
     init() {
+        if UserDefaults.standard.object(forKey: Self.chromeInterceptionEnabledDefaultsKey) == nil {
+            chromeInterceptionEnabled = true
+        } else {
+            chromeInterceptionEnabled = UserDefaults.standard.bool(forKey: Self.chromeInterceptionEnabledDefaultsKey)
+        }
+
         loadFromDisk()
         startSpeedTimer()
+        startExtensionCommandServer()
+    }
+
+    deinit {
+        speedTimer?.invalidate()
+        extensionCommandServer.stop()
     }
 
     // MARK: - Persistence
@@ -42,6 +65,36 @@ final class DownloadManager {
         }
     }
 
+    private func startExtensionCommandServer() {
+        extensionCommandServer.interceptionEnabledProvider = { [weak self] in
+            self?.chromeInterceptionEnabled ?? true
+        }
+
+        extensionCommandServer.onIncomingDownload = { [weak self] request in
+            let normalizedURL = request.url.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedURL.isEmpty else { return }
+            guard let self else { return }
+            let id = self.addDownload(
+                url: normalizedURL,
+                fileName: request.filename,
+                destinationPath: nil,
+                revealInUI: true
+            )
+            self.revealDownloadInUI(id)
+        }
+        extensionCommandServer.start()
+    }
+
+    private func revealDownloadInUI(_ id: UUID) {
+        selectedItemID = id
+
+        if let keyWindow = NSApp.windows.first {
+            keyWindow.makeKeyAndOrderFront(nil)
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     private func updateSpeed() {
         for i in items.indices {
             let id = items[i].id
@@ -63,7 +116,8 @@ final class DownloadManager {
 
     // MARK: - Actions
 
-    func addDownload(url: String, fileName: String?, destinationPath: String?) {
+    @discardableResult
+    func addDownload(url: String, fileName: String?, destinationPath: String?, revealInUI: Bool = false) -> UUID {
         let name = fileName ?? URL(string: url)?.lastPathComponent ?? "download"
         let dest: String
         if let destinationPath, !destinationPath.isEmpty {
@@ -73,16 +127,21 @@ final class DownloadManager {
             dest = downloads.appendingPathComponent(name).path
         }
 
+        let id = UUID()
         let item = DownloadItem(
-            id: UUID(),
+            id: id,
             url: url,
             fileName: name,
             dateAdded: Date(),
             destinationPath: dest
         )
         items.append(item)
+        if revealInUI {
+            selectedItemID = id
+        }
         saveToDisk()
-        startDownload(item.id)
+        startDownload(id)
+        return id
     }
 
     func startDownload(_ id: UUID) {
@@ -173,6 +232,9 @@ final class DownloadManager {
         engines[id]?.cancel()
         engines.removeValue(forKey: id)
         items.removeAll { $0.id == id }
+        if selectedItemID == id {
+            selectedItemID = nil
+        }
         lastBytesSnapshot.removeValue(forKey: id)
         saveToDisk()
     }

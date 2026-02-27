@@ -2,15 +2,29 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(DownloadManager.self) private var manager
-    @State private var selection: UUID?
     @State private var showAddSheet = false
+
+    private var selectionBinding: Binding<UUID?> {
+        Binding(
+            get: { manager.selectedItemID },
+            set: { manager.selectedItemID = $0 }
+        )
+    }
+
+    private var chromeInterceptionBinding: Binding<Bool> {
+        Binding(
+            get: { manager.chromeInterceptionEnabled },
+            set: { manager.chromeInterceptionEnabled = $0 }
+        )
+    }
 
     var body: some View {
         NavigationSplitView {
-            DownloadListView(selection: $selection)
+            DownloadListView(selection: selectionBinding)
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320)
         } detail: {
-            if let selection, let item = manager.items.first(where: { $0.id == selection }) {
+            if let selection = manager.selectedItemID,
+               let item = manager.items.first(where: { $0.id == selection }) {
                 DownloadDetailView(item: item)
             } else {
                 ContentUnavailableView(
@@ -21,6 +35,11 @@ struct ContentView: View {
             }
         }
         .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Toggle("Chrome拦截", isOn: chromeInterceptionBinding)
+                    .help("控制是否接管 Chrome 下载")
+            }
+
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
                     showAddSheet = true
